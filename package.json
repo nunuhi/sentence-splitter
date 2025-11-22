@@ -12,7 +12,8 @@
     "@google/genai": "^1.30.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "jszip": "3.10.1"
+    "jszip": "3.10.1",
+    "lamejs": "1.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

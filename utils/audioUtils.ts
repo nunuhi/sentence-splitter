@@ -1,3 +1,6 @@
+
+import * as lamejs from 'lamejs';
+
 /**
  * Decodes a File object into an AudioBuffer.
  */
@@ -54,6 +57,81 @@ export const sliceAudioBuffer = (
   }
 
   return newBuffer;
+};
+
+/**
+ * Helper to convert Float32 audio data to Int16 PCM
+ */
+const floatTo16BitPCM = (input: Float32Array): Int16Array => {
+  const output = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    output[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return output;
+};
+
+/**
+ * Encodes an AudioBuffer to MP3 Blob using lamejs.
+ */
+export const audioBufferToMp3 = (buffer: AudioBuffer): Blob => {
+  // LameJS only supports 1 (mono) or 2 (stereo) channels
+  const channels = Math.min(2, buffer.numberOfChannels);
+  const sampleRate = buffer.sampleRate;
+  const kbps = 128;
+  
+  try {
+    // Safely get the Mp3Encoder constructor, handling different ESM/CommonJS export styles
+    const Mp3EncoderConstructor = (lamejs as any).Mp3Encoder || (lamejs as any).default?.Mp3Encoder || (window as any).lamejs?.Mp3Encoder;
+    
+    if (!Mp3EncoderConstructor) {
+      throw new Error("Mp3Encoder library not loaded correctly");
+    }
+
+    const mp3encoder = new Mp3EncoderConstructor(channels, sampleRate, kbps);
+    
+    const mp3Data: Int8Array[] = [];
+    
+    // Get samples for left/right channels
+    const left = floatTo16BitPCM(buffer.getChannelData(0));
+    let right: Int16Array | undefined;
+    if (channels > 1) {
+      right = floatTo16BitPCM(buffer.getChannelData(1));
+    }
+  
+    // Encode
+    const sampleBlockSize = 1152; // 576 * 2
+    let mp3buf;
+    
+    for (let i = 0; i < left.length; i += sampleBlockSize) {
+      const leftChunk = left.subarray(i, i + sampleBlockSize);
+      let rightChunk;
+      if (right) {
+        rightChunk = right.subarray(i, i + sampleBlockSize);
+      }
+      
+      if (channels === 1) {
+        mp3buf = mp3encoder.encodeBuffer(leftChunk);
+      } else {
+        mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+      }
+      
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf);
+      }
+    }
+    
+    // Flush
+    mp3buf = mp3encoder.flush();
+    if (mp3buf.length > 0) {
+      mp3Data.push(mp3buf);
+    }
+  
+    return new Blob(mp3Data, { type: 'audio/mp3' });
+  } catch (e) {
+    console.error("MP3 Encoding failed", e);
+    throw e;
+  }
 };
 
 /**

@@ -3,7 +3,7 @@ import React, { useState, useRef } from 'react';
 import JSZip from 'jszip';
 import UploadArea from './components/UploadArea';
 import SegmentCard from './components/SegmentCard';
-import { fileToBase64, fileToAudioBuffer, sliceAudioBuffer, audioBufferToWav } from './utils/audioUtils';
+import { fileToBase64, fileToAudioBuffer, sliceAudioBuffer, audioBufferToWav, audioBufferToMp3 } from './utils/audioUtils';
 import { analyzeAudioSegments } from './services/geminiService';
 import { AppStatus, ProcessedSegment } from './types';
 
@@ -13,6 +13,7 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [originalFile, setOriginalFile] = useState<File | null>(null);
   const [isZipping, setIsZipping] = useState(false);
+  const [zipType, setZipType] = useState<'wav' | 'mp3' | null>(null);
   
   // We need to keep track of the original audio buffer to slice it later
   const audioBufferRef = useRef<AudioBuffer | null>(null);
@@ -26,8 +27,6 @@ const App: React.FC = () => {
       setStatus(AppStatus.UPLOADING);
 
       // 1. Initialize AudioContext
-      // Note: browsers require user interaction to start audio context, usually play, 
-      // but decodeAudioData works without it being 'running'.
       const CtxClass = window.AudioContext || (window as any).webkitAudioContext;
       if (!audioContextRef.current) {
         audioContextRef.current = new CtxClass();
@@ -61,7 +60,7 @@ const App: React.FC = () => {
           ctx
         );
         
-        // Convert slice to WAV Blob
+        // Convert slice to WAV Blob (default for immediate playback)
         const wavBlob = audioBufferToWav(slicedBuffer);
         const blobUrl = URL.createObjectURL(wavBlob);
         
@@ -70,7 +69,8 @@ const App: React.FC = () => {
           id: `seg-${i}-${Date.now()}`,
           blob: wavBlob,
           url: blobUrl,
-          duration: seg.end - seg.start
+          duration: seg.end - seg.start,
+          audioBuffer: slicedBuffer
         });
       }
 
@@ -90,41 +90,72 @@ const App: React.FC = () => {
     setStatus(AppStatus.IDLE);
     setErrorMsg(null);
     audioBufferRef.current = null;
+    setZipType(null);
   };
 
-  const handleDownloadAll = async () => {
+  const handleDownloadAll = async (format: 'wav' | 'mp3') => {
     if (processedSegments.length === 0) return;
     
     setIsZipping(true);
-    try {
-      const zip = new JSZip();
-      
-      // Add all segments to the zip
-      processedSegments.forEach((segment, index) => {
-        // Clean filename: remove characters that might be invalid in some filesystems if we used text
-        const filename = `sentence-${index + 1}.wav`;
-        zip.file(filename, segment.blob);
-      });
+    setZipType(format);
+    
+    // Use setTimeout to push the heavy lifting to the end of the event queue
+    // to ensure the UI updates (spinner shows up) before we start freezing things.
+    setTimeout(async () => {
+      try {
+        const zip = new JSZip();
+        let hasError = false;
+        
+        // Iterate with slight async delay to prevent UI freeze for large number of files
+        for (let index = 0; index < processedSegments.length; index++) {
+          const segment = processedSegments[index];
+          let blob = segment.blob;
+          let extension = 'wav';
+          
+          if (format === 'mp3') {
+             // Allow UI to breathe between heavy encodings
+             await new Promise(resolve => setTimeout(resolve, 10));
+             
+             try {
+               // Convert to MP3 on demand
+               blob = audioBufferToMp3(segment.audioBuffer);
+               extension = 'mp3';
+             } catch (e) {
+               console.error(`Error converting segment ${index} to MP3`, e);
+               hasError = true;
+               // In case of error, we stop to prevent giving users wrong file formats
+               // or we could skip. Here we will stop and alert.
+               throw new Error(`Failed to convert segment ${index + 1} to MP3.`);
+             }
+          }
 
-      // Generate the zip file
-      const content = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(content);
-      
-      // Trigger download
-      const a = document.createElement('a');
-      a.href = url;
-      const originalName = originalFile?.name.replace(/\.[^/.]+$/, "") || "audio";
-      a.download = `${originalName}-sentences.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error("Failed to zip files", error);
-      alert("Failed to create zip file.");
-    } finally {
-      setIsZipping(false);
-    }
+          const filename = `sentence-${index + 1}.${extension}`;
+          zip.file(filename, blob);
+        }
+
+        if (!hasError) {
+          // Generate the zip file
+          const content = await zip.generateAsync({ type: "blob" });
+          const url = URL.createObjectURL(content);
+          
+          // Trigger download
+          const a = document.createElement('a');
+          a.href = url;
+          const originalName = originalFile?.name.replace(/\.[^/.]+$/, "") || "audio";
+          a.download = `${originalName}-sentences-${format}.zip`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        }
+      } catch (error: any) {
+        console.error("Failed to zip files", error);
+        alert(`Failed to create ${format.toUpperCase()} zip file. Error: ${error.message}`);
+      } finally {
+        setIsZipping(false);
+        setZipType(null);
+      }
+    }, 100);
   };
 
   return (
@@ -137,7 +168,7 @@ const App: React.FC = () => {
             Sentence<span className="text-indigo-600">Splitter</span> AI
           </h1>
           <p className="text-lg text-slate-600 max-w-2xl mx-auto">
-            Upload your English audio recording. We'll use Gemini AI to identifying exact sentence boundaries and split them into downloadable audio clips.
+            Upload your English audio recording. We'll use Gemini AI to identify exact sentence boundaries and split them into downloadable audio clips.
           </p>
         </div>
 
@@ -179,7 +210,7 @@ const App: React.FC = () => {
           {/* Results Section */}
           {status === AppStatus.READY && (
             <div className="animate-fade-in">
-              <div className="flex flex-col sm:flex-row justify-between items-end sm:items-center mb-6 gap-4">
+              <div className="flex flex-col lg:flex-row justify-between items-end lg:items-center mb-6 gap-4">
                 <div>
                   <h2 className="text-2xl font-bold text-slate-900">Extracted Sentences</h2>
                   <p className="text-slate-500 text-sm mt-1">
@@ -187,30 +218,29 @@ const App: React.FC = () => {
                   </p>
                 </div>
                 
-                <div className="flex gap-3">
-                  <button
-                    onClick={handleDownloadAll}
-                    disabled={isZipping}
-                    className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-70 disabled:cursor-not-allowed shadow-sm hover:shadow"
-                  >
-                    {isZipping ? (
-                      <>
-                        <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <div className="flex flex-wrap gap-3 items-center justify-end">
+                   <div className="flex items-center bg-white rounded-lg border border-slate-200 shadow-sm p-1">
+                    <button
+                      onClick={() => handleDownloadAll('wav')}
+                      disabled={isZipping}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors disabled:opacity-50 
+                        ${isZipping && zipType === 'wav' ? 'bg-indigo-100 text-indigo-700' : 'hover:bg-slate-50 text-slate-700'}
+                      `}
+                    >
+                      {isZipping && zipType === 'wav' ? (
+                        <svg className="animate-spin h-4 w-4 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
-                        Zipping...
-                      </>
-                    ) : (
-                      <>
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M12 12.75l3.32-3.32m0 0-3.32-3.32M12 6v10.5" />
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 text-indigo-600">
+                           <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M12 12.75l3.32-3.32m0 0-3.32-3.32M12 6v10.5" />
                         </svg>
-                        Download All (ZIP)
-                      </>
-                    )}
-                  </button>
-                  
+                      )}
+                       Batch WAV
+                    </button>
+                  </div>
+
                   <button 
                     onClick={handleReset}
                     className="text-sm font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-slate-900 transition-colors px-4 py-2 rounded-lg shadow-sm"

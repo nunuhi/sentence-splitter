@@ -9,6 +9,7 @@ export interface ProcessedSegment extends SegmentData {
   blob: Blob;
   url: string;
   duration: number;
+  audioBuffer: AudioBuffer; // Added for on-demand MP3 conversion
 }
 
 export enum AppStatus {
