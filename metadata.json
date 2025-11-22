@@ -1,0 +1,5 @@
+{
+  "name": "Sentence Splitter AI",
+  "description": "Upload an English audio recording. This tool uses Gemini AI to identify sentences and allows you to download each sentence as a separate audio file.",
+  "requestFramePermissions": []
+}
